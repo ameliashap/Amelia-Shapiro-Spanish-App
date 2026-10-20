@@ -1,0 +1,6 @@
+{
+  "name": "HablaYa - Spanish Oral Practice AI",
+  "description": "Interactive oral Spanish speaking practice with conversational AI questions, voice recording, pronunciation and grammar feedback, and bilingual translations.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
