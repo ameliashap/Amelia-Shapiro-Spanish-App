@@ -18,15 +18,12 @@ import { AudioRecorder } from '../utils/audioRecorder';
 interface VoiceRecorderProps {
   questionId?: string;
   isEvaluating: boolean;
-  evaluationStage?: 'idle' | 'transcribing' | 'evaluating';
-  transcriptionPreview?: string | null;
   onSubmit: (payload: {
     audioBase64?: string;
     mimeType?: string;
     userText?: string;
     audioBlob?: Blob;
     duration?: number;
-    isPracticallySilent?: boolean;
   }) => void;
   onRequestMicPermission: () => Promise<boolean>;
   micPermission: 'granted' | 'denied' | 'prompt';
@@ -35,8 +32,6 @@ interface VoiceRecorderProps {
 export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
   questionId,
   isEvaluating,
-  evaluationStage = 'idle',
-  transcriptionPreview,
   onSubmit,
   onRequestMicPermission,
   micPermission,
@@ -50,7 +45,6 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
     mimeType: string;
     duration: number;
     url: string;
-    isPracticallySilent?: boolean;
   } | null>(null);
   const [isPlayingRecorded, setIsPlayingRecorded] = useState(false);
   const [textMode, setTextMode] = useState(false);
@@ -156,7 +150,6 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
         mimeType: result.mimeType,
         duration: result.duration,
         url,
-        isPracticallySilent: result.isPracticallySilent,
       });
     } catch (err: any) {
       console.error('Failed to stop recording:', err);
@@ -221,7 +214,6 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
       mimeType: recordedAudio.mimeType,
       audioBlob: recordedAudio.blob,
       duration: recordedAudio.duration,
-      isPracticallySilent: recordedAudio.isPracticallySilent,
     });
   };
 
@@ -320,28 +312,14 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
               <div className="flex items-center justify-center gap-2 mb-3">
                 <Loader2 className="w-5 h-5 text-amber-600 animate-spin" />
                 <span className="text-xs font-bold uppercase tracking-wider text-amber-800">
-                  {evaluationStage === 'transcribing'
-                    ? 'Paso 1 de 2: Transcribiendo tu voz'
-                    : 'Paso 2 de 2: Evaluando tu respuesta real'}
+                  Procesando tu voz con IA
                 </span>
               </div>
               <h4 className="text-sm font-bold text-stone-900 mb-1.5">
-                {evaluationStage === 'transcribing'
-                  ? 'Escuchando tu audio con atención...'
-                  : 'Analizando gramática y precisión...'}
+                Escuchando y analizando tu respuesta...
               </h4>
-              {transcriptionPreview ? (
-                <div className="my-2.5 p-3 rounded-xl bg-white border border-amber-200 text-xs font-medium text-stone-800 italic shadow-2xs">
-                  <span className="text-[10px] uppercase font-bold text-amber-700 block not-italic mb-1">
-                    Transcripción detectada:
-                  </span>
-                  «{transcriptionPreview}»
-                </div>
-              ) : null}
               <p className="text-xs text-stone-600 leading-relaxed">
-                {evaluationStage === 'transcribing'
-                  ? 'El tutor de IA está escuchando tu grabación para transcribir exactamente las palabras que pronunciaste, sin inventar nada.'
-                  : 'Evaluando con objetividad la gramática, conjugación y relevancia de lo que realmente dijiste.'}
+                El tutor está escuchando con atención lo que dijiste al micrófono para transcribir con precisión tus palabras y evaluar tu gramática y pronunciación real.
               </p>
             </div>
           )}
@@ -435,19 +413,6 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
                 <CheckCircle className="w-5 h-5 text-emerald-600" />
                 <span>¡Audio grabado con éxito! ({formatTime(recordedAudio.duration)})</span>
               </div>
-
-              {/* Silence Warning banner if volume was near zero */}
-              {recordedAudio.isPracticallySilent && (
-                <div className="w-full max-w-md mb-3.5 p-3.5 rounded-2xl bg-amber-50 border border-amber-300 text-amber-900 text-xs flex items-start gap-2.5 text-left">
-                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                  <div>
-                    <span className="font-bold block text-stone-900 mb-0.5">
-                      Volumen muy bajo o silencio detectado
-                    </span>
-                    El micrófono apenas detectó sonido en esta grabación. Si no hablaste o el micrófono estaba en silencio, te sugerimos presionar <strong>"Grabar de nuevo"</strong> para que el tutor pueda escuchar y evaluar tu voz real.
-                  </div>
-                </div>
-              )}
 
               {/* Audio Listen-back bar */}
               <div className="w-full max-w-md bg-stone-50 border border-stone-200/90 p-3 rounded-2xl flex items-center justify-between gap-3 mb-4">

@@ -26,10 +26,6 @@ export class AudioRecorder {
   private onVolumeChange?: (volume: number) => void;
   private onTimeUpdate?: (seconds: number) => void;
 
-  private peakVolume: number = 0;
-  private volumeSamplesSum: number = 0;
-  private volumeSamplesCount: number = 0;
-
   constructor(
     onVolumeChange?: (volume: number) => void,
     onTimeUpdate?: (seconds: number) => void
@@ -61,9 +57,6 @@ export class AudioRecorder {
   async start(): Promise<void> {
     this.audioChunks = [];
     this.startTime = Date.now();
-    this.peakVolume = 0;
-    this.volumeSamplesSum = 0;
-    this.volumeSamplesCount = 0;
 
     try {
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -121,13 +114,6 @@ export class AudioRecorder {
           }
           const average = sum / this.dataArray.length;
           const normalized = Math.min(1, average / 100);
-
-          if (normalized > this.peakVolume) {
-            this.peakVolume = normalized;
-          }
-          this.volumeSamplesSum += normalized;
-          this.volumeSamplesCount += 1;
-
           if (this.onVolumeChange) {
             this.onVolumeChange(normalized);
           }
@@ -153,43 +139,25 @@ export class AudioRecorder {
     }
   }
 
-  async stop(): Promise<{
-    blob: Blob;
-    base64: string;
-    mimeType: string;
-    duration: number;
-    isPracticallySilent: boolean;
-    peakVolume: number;
-    avgVolume: number;
-  }> {
+  async stop(): Promise<{ blob: Blob; base64: string; mimeType: string; duration: number }> {
     return new Promise((resolve, reject) => {
       if (!this.mediaRecorder || this.mediaRecorder.state === 'inactive') {
         return reject(new Error('Recorder is not active'));
       }
 
-      const exactElapsed = (Date.now() - this.startTime) / 1000;
-      const duration = Math.max(1, Math.round(exactElapsed));
+      const duration = Math.max(1, Math.floor((Date.now() - this.startTime) / 1000));
       const mimeType = this.mediaRecorder.mimeType || 'audio/webm';
 
       this.mediaRecorder.onstop = async () => {
         try {
           const blob = new Blob(this.audioChunks, { type: mimeType });
           const base64 = await this.blobToBase64(blob);
-          const avgVolume =
-            this.volumeSamplesCount > 0 ? this.volumeSamplesSum / this.volumeSamplesCount : 0;
-          // Deemed silent if peak volume is below threshold or duration is less than 0.7s
-          const isPracticallySilent =
-            (this.peakVolume < 0.035 && avgVolume < 0.015) || exactElapsed < 0.7;
-
           this.cleanup();
           resolve({
             blob,
             base64,
             mimeType,
             duration,
-            isPracticallySilent,
-            peakVolume: this.peakVolume,
-            avgVolume,
           });
         } catch (err) {
           this.cleanup();
