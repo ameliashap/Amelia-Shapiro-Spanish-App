@@ -75,23 +75,61 @@ export const FeedbackCard: React.FC<FeedbackCardProps> = ({
     return 'text-rose-700 bg-rose-50 border-rose-200';
   };
 
+  const isSilent = Boolean(
+    evaluation.noSpeechDetected ||
+      (evaluation.overallScore === 0 && evaluation.isAudio && evaluation.transcription.includes('No se detectó'))
+  );
   const hasMistakes = evaluation.corrections && evaluation.corrections.length > 0;
 
   return (
     <div className="bg-white rounded-3xl border border-stone-200/90 shadow-xs p-6 sm:p-8 mb-8 transition-all animate-in fade-in slide-in-from-bottom-2 duration-200">
+      {/* Warning banner if silent recording */}
+      {isSilent && (
+        <div className="mb-6 p-4 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+          <div className="text-xs sm:text-sm">
+            <span className="font-bold block mb-0.5">No se detectó voz clara en el micrófono</span>
+            La IA no pudo escuchar palabras claras en tu grabación. Asegúrate de que el micrófono esté encendido, habla en voz alta y vuelve a presionar "Intentar de nuevo esta pregunta".
+          </div>
+        </div>
+      )}
+
+      {/* Notice if the response was off-topic */}
+      {!isSilent && evaluation.isAccurateAnswer === false && (
+        <div className="mb-6 p-4 rounded-2xl bg-orange-50 border border-orange-200 text-orange-900 flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-orange-500 shrink-0 mt-0.5" />
+          <div className="text-xs sm:text-sm">
+            <span className="font-bold block mb-0.5">Nota sobre la precisión de tu respuesta</span>
+            La IA detectó que tu respuesta no contestó directamente a lo que se preguntaba en "{question.questionEs}". Intenta responder acorde a la pregunta para practicar la conversación de forma auténtica.
+          </div>
+        </div>
+      )}
+
       {/* 1. Header & Scores Banner */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-6 border-b border-stone-200/70">
         <div>
           <div className="flex items-center gap-2 mb-1">
-            <span className="text-[11px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200">
-              Retroalimentación del Tutor
+            <span
+              className={`text-[11px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${
+                isSilent
+                  ? 'bg-stone-100 text-stone-600 border-stone-300'
+                  : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+              }`}
+            >
+              {isSilent ? 'Sin voz detectada' : 'Retroalimentación Real de la IA'}
             </span>
             <span className="text-xs text-stone-400">
-              {hasMistakes ? `${evaluation.corrections.length} sugerencias` : '¡Sin errores!'}
+              {isSilent
+                ? 'Grabación vacía o inaudible'
+                : hasMistakes
+                ? `${evaluation.corrections.length} ${evaluation.corrections.length === 1 ? 'sugerencia' : 'sugerencias'}`
+                : '¡Sin errores gramaticales!'}
             </span>
           </div>
           <h3 className="text-xl sm:text-2xl font-bold text-stone-900">
-            {evaluation.praise || '¡Buen trabajo con tu respuesta!'}
+            {isSilent
+              ? 'Intenta grabar tu respuesta nuevamente'
+              : evaluation.praise || 'Evaluación de tu respuesta'}
           </h3>
           <p className="text-xs sm:text-sm text-stone-600 mt-0.5">
             {evaluation.summary}
@@ -265,17 +303,27 @@ export const FeedbackCard: React.FC<FeedbackCardProps> = ({
                   </div>
                 ))}
               </div>
+            ) : isSilent ? (
+              <div className="p-6 rounded-2xl bg-amber-50/70 border border-amber-200 text-center">
+                <AlertTriangle className="w-8 h-8 text-amber-600 mx-auto mb-2" />
+                <h4 className="font-bold text-stone-900 text-base">
+                  No se detectó audio con voz
+                </h4>
+                <p className="text-xs text-stone-600 mt-1 max-w-md mx-auto">
+                  No se pudieron analizar errores gramaticales porque el micrófono no captó palabras audibles. Por favor intenta responder de nuevo hablando más cerca del micrófono.
+                </p>
+              </div>
             ) : (
               <div className="p-6 rounded-2xl bg-emerald-50/70 border border-emerald-200 text-center">
                 <CheckCircle2 className="w-8 h-8 text-emerald-600 mx-auto mb-2" />
                 <h4 className="font-bold text-stone-900 text-base">
                   {evaluation.isAudio
-                    ? '¡Excelente gramática y pronunciación!'
+                    ? '¡Excelente respuesta oral!'
                     : '¡Excelente gramática y redacción!'}
                 </h4>
                 <p className="text-xs text-stone-600 mt-1 max-w-md mx-auto">
                   {evaluation.isAudio
-                    ? 'No se detectaron errores notables en tu respuesta oral. Tu mensaje fue claro y fluido.'
+                    ? 'No se detectaron errores gramaticales en lo que dijiste. Tu respuesta fue correcta y comprensible.'
                     : 'No se detectaron errores notables en tu texto. Tu redacción fue gramaticalmente sólida.'}
                 </p>
               </div>

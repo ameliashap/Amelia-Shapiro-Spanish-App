@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 
 dotenv.config();
 
@@ -415,13 +415,167 @@ app.post('/api/practice/tts', async (req, res) => {
   }
 });
 
+// Helper function for strict, verbatim audio transcription
+async function transcribeAudio(
+  audioBase64: string,
+  rawMimeType: string
+): Promise<{ text: string; noSpeechDetected: boolean }> {
+  const cleanBase64 = audioBase64.includes('base64,') ? audioBase64.split('base64,')[1] : audioBase64;
+  const cleanMimeType = rawMimeType.split(';')[0].trim() || 'audio/webm';
+
+  const audioPart = {
+    inlineData: {
+      mimeType: cleanMimeType,
+      data: cleanBase64,
+    },
+  };
+
+  const transcriptionPrompt = `You are a strict, verbatim Spanish audio transcriber.
+Listen to this audio clip attentively.
+RULES:
+1. If the audio is silent, background static, breathing, unintelligible noise, or contains NO intelligible words in Spanish, respond with EXACTLY:
+NO_SPEECH_DETECTED
+2. If human words in Spanish are spoken, output ONLY the exact Spanish words verbatim. Do NOT correct grammatical errors, do NOT translate, do NOT add commentary, and do NOT put quotes around the text.
+3. NEVER fabricate or imagine words. If unsure or if nothing was said, output: NO_SPEECH_DETECTED`;
+
+  let transcribedRaw = '';
+
+  // Attempt using gemini-3.5-transcribe first (recommended for audio transcription tasks)
+  try {
+    const res = await ai.models.generateContent({
+      model: 'gemini-3.5-transcribe',
+      contents: {
+        parts: [audioPart, { text: transcriptionPrompt }],
+      },
+      config: {
+        temperature: 0.0,
+      },
+    });
+    transcribedRaw = (res.text || '').trim();
+  } catch (err: any) {
+    const errStr = `${err?.message || ''}`.toLowerCase();
+    if (
+      errStr.includes('mime') ||
+      errStr.includes('format') ||
+      errStr.includes('unsupported')
+    ) {
+      throw err;
+    }
+    console.warn('gemini-3.5-transcribe failed, trying gemini-3.8-flash for transcription:', err?.message || err);
+    const res2 = await ai.models.generateContent({
+      model: 'gemini-3.8-flash',
+      contents: {
+        parts: [audioPart, { text: transcriptionPrompt }],
+      },
+      config: {
+        temperature: 0.0,
+      },
+    });
+    transcribedRaw = (res2.text || '').trim();
+  }
+
+  // Clean up any outer quotes or whitespace
+  let cleanText = transcribedRaw.replace(/^["'`]|["'`]$/g, '').trim();
+
+  const isNoSpeech =
+    !cleanText ||
+    cleanText === 'NO_SPEECH_DETECTED' ||
+    cleanText === 'NO_SPEECH' ||
+    cleanText.toUpperCase().includes('NO_SPEECH_DETECTED') ||
+    cleanText.toLowerCase().includes('no se detect') ||
+    cleanText.toLowerCase().includes('no human speech') ||
+    cleanText.toLowerCase().includes('no speech detected') ||
+    cleanText.toLowerCase().includes('silence') ||
+    cleanText.length < 2;
+
+  if (isNoSpeech) {
+    return { text: '', noSpeechDetected: true };
+  }
+
+  return { text: cleanText, noSpeechDetected: false };
+}
+
+function getSilentAudioResponse(questionEs: string, level: string, topic: string) {
+  const sample =
+    FALLBACK_QUESTIONS[level]?.[topic]?.[0] || FALLBACK_QUESTIONS.beginner.daily_life[0];
+  return {
+    transcription: '[No se detectó voz en la grabación]',
+    transcriptionEn: '[No audible speech detected in recording]',
+    noSpeechDetected: true,
+    isAccurateAnswer: false,
+    overallScore: 0,
+    fluencyScore: 0,
+    grammarScore: 0,
+    vocabularyScore: 0,
+    praise: 'No se detectó voz en la grabación.',
+    summary:
+      'La grabación no contiene palabras audibles en español o estuvo en silencio. El evaluador de IA no puede juzgar tu pronunciación o gramática sin escuchar tu voz. Por favor verifica que tu micrófono funcione, habla con claridad y vuelve a grabar tu respuesta.',
+    corrections: [],
+    betterWay: {
+      nativeSpanish: sample.sampleAnswer,
+      englishTranslation: sample.sampleAnswerEn,
+      whyBetter: 'Esta es una respuesta modelo para responder adecuadamente a esta pregunta.',
+    },
+    pronunciationTips: [
+      'Asegúrate de hablar a un volumen normal y audible cerca de tu micrófono.',
+      'Articula con calma cada sílaba en español.',
+    ],
+    tutorReply: {
+      replyEs: 'No pude escucharte esta vez. ¿Podrías volver a intentarlo hablando en voz alta hacia el micrófono?',
+      replyEn: "I couldn't hear you this time. Could you try again speaking out loud into the microphone?",
+    },
+    isAudio: true,
+  };
+}
+
+// POST /api/practice/transcribe
+// Dedicated audio transcription endpoint to allow step-by-step UI and genuine transcription verification
+app.post('/api/practice/transcribe', async (req, res) => {
+  try {
+    const { audio, mimeType = 'audio/webm' } = req.body;
+    if (!audio) {
+      return res.status(400).json({ error: 'Audio is required for transcription' });
+    }
+
+    if (!apiKey || !apiKey.trim()) {
+      return res.status(503).json({
+        error: 'El servicio de IA no está configurado (falta la clave API de Gemini).',
+      });
+    }
+
+    const result = await transcribeAudio(audio, mimeType);
+    return res.json({
+      success: true,
+      transcription: result.text,
+      noSpeechDetected: result.noSpeechDetected,
+    });
+  } catch (err: any) {
+    console.error('Transcription error:', err);
+    const fullErrorStr = `${err?.message || ''} ${JSON.stringify(err?.error || '')}`.toLowerCase();
+    if (
+      fullErrorStr.includes('mime') ||
+      fullErrorStr.includes('unsupported') ||
+      fullErrorStr.includes('audio')
+    ) {
+      return res.status(400).json({
+        error: 'El formato de grabación no es compatible. Te sugerimos escribir tu respuesta con el teclado.',
+      });
+    }
+    return res.status(500).json({
+      error: 'Error al transcribir la grabación de audio. Por favor intenta de nuevo.',
+    });
+  }
+});
+
 // POST /api/practice/evaluate
 // Evaluates oral audio response or typed text response
 app.post('/api/practice/evaluate', async (req, res) => {
   try {
     const {
-      audio, // base64 string
+      audio, // base64 string (optional if transcribedText provided)
       mimeType = 'audio/webm',
+      transcribedText, // optional pre-transcribed text from step 1
+      noSpeechDetected: explicitNoSpeech,
       questionEs,
       questionEn,
       level = 'beginner',
@@ -429,7 +583,7 @@ app.post('/api/practice/evaluate', async (req, res) => {
       userText = '',
     } = req.body;
 
-    const isAudio = Boolean(audio);
+    const isAudio = Boolean(audio) || typeof transcribedText === 'string';
 
     if (!isAudio && (!userText || !userText.trim())) {
       return res.status(400).json({
@@ -445,122 +599,256 @@ app.post('/api/practice/evaluate', async (req, res) => {
       });
     }
 
-    const evaluationPrompt = `You are an encouraging, expert native Spanish language tutor assessing a student response.
+    // STEP 1: Handle Audio & Silence Detection with 100% honesty
+    let actualStudentText = '';
+
+    if (isAudio) {
+      // If the client already flagged explicit no speech, return honest 0-score immediately
+      if (explicitNoSpeech === true) {
+        return res.json({
+          success: true,
+          data: getSilentAudioResponse(questionEs, level, topic),
+        });
+      }
+
+      // If transcribedText is supplied from pre-transcription step
+      if (typeof transcribedText === 'string') {
+        const trimmed = transcribedText.trim();
+        if (!trimmed || trimmed === 'NO_SPEECH_DETECTED') {
+          return res.json({
+            success: true,
+            data: getSilentAudioResponse(questionEs, level, topic),
+          });
+        }
+        actualStudentText = trimmed;
+      } else if (audio) {
+        // Run dedicated transcription first
+        const transResult = await transcribeAudio(audio, mimeType);
+        if (transResult.noSpeechDetected || !transResult.text) {
+          return res.json({
+            success: true,
+            data: getSilentAudioResponse(questionEs, level, topic),
+          });
+        }
+        actualStudentText = transResult.text;
+      } else {
+        return res.status(400).json({ error: 'No se recibió audio ni texto para evaluar.' });
+      }
+    } else {
+      actualStudentText = userText.trim();
+    }
+
+    const evaluationSchema = {
+      type: Type.OBJECT,
+      properties: {
+        transcription: {
+          type: Type.STRING,
+          description:
+            'Must match EXACTLY what the student said or typed. Never invent words or modify their answer.',
+        },
+        transcriptionEn: {
+          type: Type.STRING,
+          description: 'Faithful English translation of what the student said or typed.',
+        },
+        noSpeechDetected: {
+          type: Type.BOOLEAN,
+          description: 'True only if no speech was present (false in this case).',
+        },
+        isAccurateAnswer: {
+          type: Type.BOOLEAN,
+          description:
+            'True if what the student said actually answers the prompt question accurately and relevantly.',
+        },
+        overallScore: {
+          type: Type.INTEGER,
+          description:
+            'Genuine score from 0 to 100 based strictly on accuracy, grammar, and speech effort.',
+        },
+        fluencyScore: {
+          type: Type.INTEGER,
+          description: 'Flow, pacing, and natural sentence construction (0 to 100).',
+        },
+        grammarScore: {
+          type: Type.INTEGER,
+          description:
+            'Grammatical correctness: conjugations, gender/number agreement, ser/estar, por/para (0 to 100).',
+        },
+        vocabularyScore: {
+          type: Type.INTEGER,
+          description: 'Appropriate, natural word choice for the level (0 to 100).',
+        },
+        praise: {
+          type: Type.STRING,
+          description:
+            'Honest praise highlighting specifically what the student did well. Never praise errors.',
+        },
+        summary: {
+          type: Type.STRING,
+          description:
+            'Objective assessment of the student answer: accuracy in answering the question, grammatical points, and clarity.',
+        },
+        corrections: {
+          type: Type.ARRAY,
+          description:
+            'List of actual errors present in what the student said. Empty array [] if no mistakes were made. NEVER invent errors.',
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              original: {
+                type: Type.STRING,
+                description: 'The exact flawed phrase the student used.',
+              },
+              correction: {
+                type: Type.STRING,
+                description: 'The corrected phrasing in Spanish.',
+              },
+              explanation: {
+                type: Type.STRING,
+                description: 'Clear, concise English explanation of the rule and why it should be changed.',
+              },
+              category: {
+                type: Type.STRING,
+                description: 'Category: grammar, vocabulary, agreement, or syntax.',
+              },
+            },
+            required: ['original', 'correction', 'explanation', 'category'],
+          },
+        },
+        betterWay: {
+          type: Type.OBJECT,
+          description:
+            'How a native Spanish speaker would naturally express the student\'s intended message.',
+          properties: {
+            nativeSpanish: {
+              type: Type.STRING,
+              description: 'Authentic native Spanish phrasing.',
+            },
+            englishTranslation: {
+              type: Type.STRING,
+              description: 'English translation of the native phrasing.',
+            },
+            whyBetter: {
+              type: Type.STRING,
+              description: 'English explanation of why this phrasing sounds natural and native.',
+            },
+          },
+          required: ['nativeSpanish', 'englishTranslation', 'whyBetter'],
+        },
+        pronunciationTips: {
+          type: Type.ARRAY,
+          description:
+            '1 to 3 specific pronunciation/phonetic tips for Spanish sounds heard in the audio. Empty array if typed text.',
+          items: { type: Type.STRING },
+        },
+        tutorReply: {
+          type: Type.OBJECT,
+          description:
+            'A natural conversational reaction in Spanish continuing the conversation based on the student\'s actual message.',
+          properties: {
+            replyEs: {
+              type: Type.STRING,
+              description: 'Conversational reaction in Spanish.',
+            },
+            replyEn: {
+              type: Type.STRING,
+              description: 'English translation of tutor reaction.',
+            },
+          },
+          required: ['replyEs', 'replyEn'],
+        },
+      },
+      required: [
+        'transcription',
+        'transcriptionEn',
+        'noSpeechDetected',
+        'isAccurateAnswer',
+        'overallScore',
+        'fluencyScore',
+        'grammarScore',
+        'vocabularyScore',
+        'praise',
+        'summary',
+        'corrections',
+        'betterWay',
+        'pronunciationTips',
+        'tutorReply',
+      ],
+    };
+
+    const evaluationPrompt = isAudio
+      ? `You are an expert native Spanish language oral examiner assessing a student's spoken response.
+The student was asked the following question:
+- Question in Spanish: "${questionEs}"
+- Question in English: "${questionEn}"
+- Target Level: ${level}
+- Topic: ${topic}
+
+The student recorded their voice into the microphone.
+The VERBATIM audio transcription of what the student ACTUALLY said is:
+"${actualStudentText}"
+
+CRITICAL MANDATES:
+1. STRICT TRANSCRIPTION ACCURACY:
+   - "transcription" MUST BE EXACTLY: "${actualStudentText}".
+   - "transcriptionEn" must be a faithful English translation of "${actualStudentText}".
+   - "noSpeechDetected" must be false.
+   - DO NOT fabricate, assume, or invent words that the student did not say.
+2. ACCURACY EVALUATION:
+   - Determine if what the student said ("${actualStudentText}") genuinely and accurately answers the prompt question ("${questionEs}").
+   - Set "isAccurateAnswer" to true ONLY if their answer is relevant and addresses the question.
+   - If they said something unrelated (e.g. only "Hola" or "No sé" or gibberish), set "isAccurateAnswer" to false.
+3. SCORING (0 to 100):
+   - Score objectively based strictly on the student's actual words ("${actualStudentText}").
+   - If the answer accurately answers the question with correct grammar, award a high score (75-100).
+   - If there are grammatical mistakes or poor accuracy, reflect that proportionally.
+   - If they only said an irrelevant greeting or disconnected fragment, score strictly low (20-40).
+4. CORRECTIONS:
+   - Identify real errors in grammar, verb conjugations, gender/number agreement, ser/estar, por/para, or syntax present in "${actualStudentText}".
+   - If what they said contains NO grammatical errors, return an empty array []! NEVER invent false errors!
+5. PRONUNCIATION TIPS:
+   - Since this was an audio recording, provide 1 to 3 specific Spanish phonetic tips relevant to the sounds in the words they spoke (e.g. vowels, rolled rr, soft d, accent stress).
+6. BETTER WAY:
+   - Show how an authentic native Spanish speaker would naturally express the student's intended answer to "${questionEs}".
+7. TUTOR REPLY:
+   - Friendly 1-2 sentence conversational Spanish reaction responding directly to the specific meaning of "${actualStudentText}".`
+      : `You are an expert native Spanish language tutor assessing a student's written response submitted via keyboard.
+- The student typed: "${actualStudentText}"
+- Transcribe EXACTLY what the student typed: "${actualStudentText}".
+- ACCURACY: Check if what the student typed accurately answers "${questionEs}". Set "isAccurateAnswer" accordingly.
+- SCORING: Genuine scores (0-100) based strictly on written grammar and vocabulary.
+- CORRECTIONS: Identify specific grammar or spelling errors in their typed text. If none, return [].
+- PRONUNCIATION: The student typed their response. Set "pronunciationTips" to [] (EMPTY ARRAY). Do not invent pronunciation comments.
+- NATIVE REFORMULATION: Provide natural native Spanish phrasing.
+- TUTOR REPLY: Friendly Spanish follow-up reacting to what they wrote.
 
 Context:
-- Target Question: "${questionEs}" (English: "${questionEn}")
-- Student Level: ${level}
-- Topic: ${topic}
-- Submission Mode: ${isAudio ? 'ORAL AUDIO RECORDING (spoken aloud via microphone)' : 'TYPED WRITTEN TEXT (keyboard input, no microphone)'}
-${userText ? `- Student preliminary transcript or typed text: "${userText}"` : ''}
-
-CRITICAL RULES:
-${
-  isAudio
-    ? `1. AUDIO TRANSCRIPTION: Carefully transcribe in Spanish EXACTLY what the student said in the audio.
-   - If audio is silent or unintelligible noise, transcribe what could be heard or note "[No se detectó voz clara]".
-2. TRANSLATION: English translation of what student said.
-3. SCORING (0-100):
-   - overallScore: integer reflecting oral effort, intelligibility, grammar, and appropriateness for ${level} level.
-   - fluencyScore: speech flow, rhythm, and sentence construction.
-   - grammarScore: conjugations, gender/number agreement, ser/estar, por/para.
-   - vocabularyScore: natural word choice.
-4. CORRECTIONS: specific errors in student's spoken response.
-5. PRONUNCIATION TIPS: 2-3 actionable phonetics/pronunciation tips for Spanish sounds (e.g. rolling rr, soft d, vowels, b/v).`
-    : `1. TRANSCRIPTION: The student submitted typed text. Set "transcription" to exactly what the student typed: "${userText}".
-2. TRANSLATION: Accurate English translation of what the student typed.
-3. SCORING (0-100):
-   - overallScore: integer reflecting written grammar, vocabulary, and appropriateness for ${level} level.
-   - fluencyScore: written coherence, sentence structure, and flow.
-   - grammarScore: written grammar, correct conjugations, agreement, and accentuation.
-   - vocabularyScore: word choice and variety.
-4. CORRECTIONS: specific grammatical or orthographic mistakes in the typed text.
-5. PRONUNCIATION TIPS: IMPORTANT: The student TYPED this response without speaking into a microphone. Set "pronunciationTips" to [] (EMPTY ARRAY). Do NOT invent or comment on pronunciation, voice clarity, or accents.`
-}
-
-6. BETTER / MORE NATURAL WAY TO SAY IT (Reformulation):
-   - nativeSpanish: How a native Spanish speaker would naturally express this thought.
-   - englishTranslation: English translation of the native version.
-   - whyBetter: Brief explanation in English of why this phrasing sounds more natural.
-7. TUTOR CONVERSATIONAL REPLY:
-   - replyEs: A friendly, natural 1-2 sentence Spanish follow-up reaction continuing the conversation.
-   - replyEn: English translation of the tutor's reply.
-8. PRAISE:
-   - What the student did well (${isAudio ? 'in their spoken Spanish' : 'in their written response'}).
-
-Return ONLY valid JSON matching this schema:
-{
-  "transcription": "...",
-  "transcriptionEn": "...",
-  "overallScore": 85,
-  "fluencyScore": 80,
-  "grammarScore": 90,
-  "vocabularyScore": 85,
-  "praise": "...",
-  "summary": "...",
-  "corrections": [
-    {
-      "original": "...",
-      "correction": "...",
-      "explanation": "...",
-      "category": "grammar"
-    }
-  ],
-  "betterWay": {
-    "nativeSpanish": "...",
-    "englishTranslation": "...",
-    "whyBetter": "..."
-  },
-  "pronunciationTips": [],
-  "tutorReply": {
-    "replyEs": "...",
-    "replyEn": "..."
-  }
-}`;
-
-    const contentParts: any[] = [];
-
-    // If audio is available, attach inline data
-    if (isAudio && audio) {
-      const cleanBase64 = audio.includes('base64,') ? audio.split('base64,')[1] : audio;
-      const cleanMimeType = mimeType.split(';')[0].trim();
-      contentParts.push({
-        inlineData: {
-          mimeType: cleanMimeType || 'audio/webm',
-          data: cleanBase64,
-        },
-      });
-    }
-
-    contentParts.push({
-      text: evaluationPrompt,
-    });
+- Target Question (Spanish): "${questionEs}"
+- Target Question (English): "${questionEn}"
+- Target Student Level: ${level}
+- Topic: ${topic}`;
 
     // Call Gemini with fallback to gemini-3.1-flash-lite if primary is temporarily busy
     let responseText = '';
     try {
       const response = await ai.models.generateContent({
         model: 'gemini-3.8-flash',
-        contents: { parts: contentParts },
-        config: { responseMimeType: 'application/json' },
+        contents: evaluationPrompt,
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: evaluationSchema,
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        },
       });
       responseText = response.text || '';
     } catch (primaryErr: any) {
-      const pFullStr = `${primaryErr?.message || ''} ${JSON.stringify(primaryErr?.error || primaryErr?.details || '')}`.toLowerCase();
-      // If audio format was rejected by Gemini, do not fallback to flash-lite as it will also reject it; throw immediately!
-      if (
-        pFullStr.includes('mime') ||
-        pFullStr.includes('audio') ||
-        pFullStr.includes('unsupported format') ||
-        (pFullStr.includes('invalid_argument') && pFullStr.includes('inline_data'))
-      ) {
-        throw primaryErr;
-      }
       console.warn('Primary evaluation model error, attempting gemini-3.1-flash-lite fallback:', primaryErr?.message || primaryErr);
       const fallbackRes = await ai.models.generateContent({
         model: 'gemini-3.1-flash-lite',
-        contents: { parts: contentParts },
-        config: { responseMimeType: 'application/json' },
+        contents: evaluationPrompt,
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: evaluationSchema,
+        },
       });
       responseText = fallbackRes.text || '';
     }

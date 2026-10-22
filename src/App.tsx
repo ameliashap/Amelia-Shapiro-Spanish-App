@@ -19,6 +19,8 @@ export default function App() {
   const [previousQuestions, setPreviousQuestions] = useState<string[]>([]);
 
   const [isEvaluating, setIsEvaluating] = useState(false);
+  const [evaluationStage, setEvaluationStage] = useState<'idle' | 'transcribing' | 'evaluating'>('idle');
+  const [transcriptionPreview, setTranscriptionPreview] = useState<string | null>(null);
   const [evaluation, setEvaluation] = useState<EvaluationResult | null>(null);
   const [evaluationError, setEvaluationError] = useState<string | null>(null);
   const [currentUserAudioUrl, setCurrentUserAudioUrl] = useState<string | undefined>(undefined);
@@ -36,6 +38,7 @@ export default function App() {
     userText?: string;
     audioBlob?: Blob;
     duration?: number;
+    isPracticallySilent?: boolean;
   } | null>(null);
 
   // Check microphone permissions on mount
@@ -70,6 +73,8 @@ export default function App() {
       setEvaluation(null);
       setEvaluationError(null);
       setCurrentUserAudioUrl(undefined);
+      setEvaluationStage('idle');
+      setTranscriptionPreview(null);
       lastFailedSubmissionRef.current = null;
 
       try {
@@ -135,6 +140,7 @@ export default function App() {
     userText?: string;
     audioBlob?: Blob;
     duration?: number;
+    isPracticallySilent?: boolean;
   }) => {
     if (!question) return;
 
@@ -144,6 +150,7 @@ export default function App() {
     stopAllAudio();
     setIsEvaluating(true);
     setEvaluationError(null);
+    setTranscriptionPreview(null);
 
     let audioUrl: string | undefined = undefined;
     if (payload.audioBlob) {
@@ -152,39 +159,122 @@ export default function App() {
     }
 
     try {
-      const response = await fetch('/api/practice/evaluate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          audio: payload.audioBase64,
-          mimeType: payload.mimeType || 'audio/webm',
-          userText: payload.userText,
-          questionEs: question.questionEs,
-          questionEn: question.questionEn,
-          level: question.level,
-          topic: question.topic,
-        }),
-      });
+      let evalResult: EvaluationResult;
 
-      // If user switched questions while this request was flying, discard it (Fixes Issue 6)
-      if (activeQuestionIdRef.current !== targetQuestionId) {
-        console.warn('Evaluation response received for discarded question, ignoring.');
-        return;
+      if (payload.audioBase64) {
+        // STEP 1: Dedicated Audio Transcription
+        setEvaluationStage('transcribing');
+
+        const transResponse = await fetch('/api/practice/transcribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            audio: payload.audioBase64,
+            mimeType: payload.mimeType || 'audio/webm',
+          }),
+        });
+
+        // If user changed question while in flight, discard response
+        if (activeQuestionIdRef.current !== targetQuestionId) {
+          console.warn('Transcription response received for discarded question, ignoring.');
+          return;
+        }
+
+        if (!transResponse.ok) {
+          const transErr = await transResponse.json().catch(() => ({}));
+          throw new Error(
+            transErr.error || 'Error al transcribir la grabación de voz. Por favor intenta de nuevo.'
+          );
+        }
+
+        const transData = await transResponse.json();
+
+        // If audio was empty/silent or no human speech detected:
+        if (transData.noSpeechDetected || !transData.transcription) {
+          // Send explicit noSpeechDetected to evaluate endpoint to get honest 0-score assessment
+          const evalResponse = await fetch('/api/practice/evaluate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              audio: payload.audioBase64,
+              mimeType: payload.mimeType || 'audio/webm',
+              noSpeechDetected: true,
+              questionEs: question.questionEs,
+              questionEn: question.questionEn,
+              level: question.level,
+              topic: question.topic,
+            }),
+          });
+
+          if (activeQuestionIdRef.current !== targetQuestionId) return;
+
+          if (!evalResponse.ok) {
+            const errJson = await evalResponse.json().catch(() => ({}));
+            throw new Error(errJson.error || 'No se pudo generar la retroalimentación.');
+          }
+
+          const resData = await evalResponse.json();
+          evalResult = resData.data;
+        } else {
+          // STEP 2: Genuine speech was transcribed! Now evaluate ONLY what was actually spoken.
+          const cleanTranscript = transData.transcription.trim();
+          setTranscriptionPreview(cleanTranscript);
+          setEvaluationStage('evaluating');
+
+          const evalResponse = await fetch('/api/practice/evaluate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              transcribedText: cleanTranscript,
+              audio: payload.audioBase64,
+              mimeType: payload.mimeType || 'audio/webm',
+              questionEs: question.questionEs,
+              questionEn: question.questionEn,
+              level: question.level,
+              topic: question.topic,
+            }),
+          });
+
+          if (activeQuestionIdRef.current !== targetQuestionId) return;
+
+          if (!evalResponse.ok) {
+            const errJson = await evalResponse.json().catch(() => ({}));
+            throw new Error(
+              errJson.error || 'El evaluador de IA no pudo evaluar tu respuesta. Por favor intenta de nuevo.'
+            );
+          }
+
+          const resData = await evalResponse.json();
+          evalResult = resData.data;
+        }
+      } else {
+        // Text mode submission
+        setEvaluationStage('evaluating');
+        const evalResponse = await fetch('/api/practice/evaluate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userText: payload.userText,
+            questionEs: question.questionEs,
+            questionEn: question.questionEn,
+            level: question.level,
+            topic: question.topic,
+          }),
+        });
+
+        if (activeQuestionIdRef.current !== targetQuestionId) return;
+
+        if (!evalResponse.ok) {
+          const errJson = await evalResponse.json().catch(() => ({}));
+          throw new Error(
+            errJson.error || 'El evaluador de IA no pudo evaluar tu texto. Por favor intenta de nuevo.'
+          );
+        }
+
+        const resData = await evalResponse.json();
+        evalResult = resData.data;
       }
 
-      if (!response.ok) {
-        const errJson = await response.json().catch(() => ({}));
-        throw new Error(
-          errJson.error || 'El evaluador de IA no pudo procesar tu respuesta. Por favor intenta de nuevo.'
-        );
-      }
-
-      const resData = await response.json();
-      if (!resData || !resData.data) {
-        throw new Error('Respuesta inválida devuelta por el servidor.');
-      }
-
-      const evalResult: EvaluationResult = resData.data;
       setEvaluation(evalResult);
       lastFailedSubmissionRef.current = null;
 
@@ -212,6 +302,7 @@ export default function App() {
       );
     } finally {
       setIsEvaluating(false);
+      setEvaluationStage('idle');
     }
   };
 
@@ -340,6 +431,8 @@ export default function App() {
           <VoiceRecorder
             questionId={question.id}
             isEvaluating={isEvaluating}
+            evaluationStage={evaluationStage}
+            transcriptionPreview={transcriptionPreview}
             onSubmit={handleSubmitEvaluation}
             onRequestMicPermission={requestMicPermission}
             micPermission={micPermission}

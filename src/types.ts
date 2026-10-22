@@ -51,6 +51,8 @@ export interface EvaluationResult {
     replyEn: string;
   };
   isAudio?: boolean;
+  noSpeechDetected?: boolean;
+  isAccurateAnswer?: boolean;
 }
 
 export interface PracticeHistoryItem {

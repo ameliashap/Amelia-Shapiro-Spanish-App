@@ -6,23 +6,27 @@ import {
   Pause,
   RotateCcw,
   Send,
-  Volume2,
   AlertCircle,
   Keyboard,
   AudioWaveform as WaveformIcon,
   CheckCircle,
+  Loader2,
+  Sparkles,
 } from 'lucide-react';
 import { AudioRecorder } from '../utils/audioRecorder';
 
 interface VoiceRecorderProps {
   questionId?: string;
   isEvaluating: boolean;
+  evaluationStage?: 'idle' | 'transcribing' | 'evaluating';
+  transcriptionPreview?: string | null;
   onSubmit: (payload: {
     audioBase64?: string;
     mimeType?: string;
     userText?: string;
     audioBlob?: Blob;
     duration?: number;
+    isPracticallySilent?: boolean;
   }) => void;
   onRequestMicPermission: () => Promise<boolean>;
   micPermission: 'granted' | 'denied' | 'prompt';
@@ -31,6 +35,8 @@ interface VoiceRecorderProps {
 export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
   questionId,
   isEvaluating,
+  evaluationStage = 'idle',
+  transcriptionPreview,
   onSubmit,
   onRequestMicPermission,
   micPermission,
@@ -44,16 +50,15 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
     mimeType: string;
     duration: number;
     url: string;
+    isPracticallySilent?: boolean;
   } | null>(null);
   const [isPlayingRecorded, setIsPlayingRecorded] = useState(false);
-  const [speechRecognitionText, setSpeechRecognitionText] = useState('');
   const [textMode, setTextMode] = useState(false);
   const [manualText, setManualText] = useState('');
   const [micErrorMessage, setMicErrorMessage] = useState<string | null>(null);
 
   const recorderRef = useRef<AudioRecorder | null>(null);
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
-  const speechRecognitionRef = useRef<any>(null);
 
   // Helper to completely stop and release the current audio playback element
   const resetAudioPlayer = () => {
@@ -68,14 +73,13 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
     setIsPlayingRecorded(false);
   };
 
-  // Reset recorder and playback state whenever the question changes (Fixes Issue 5 & 6)
+  // Reset recorder and playback state whenever the question changes
   useEffect(() => {
     resetAudioPlayer();
     if (recordedAudio?.url) {
       URL.revokeObjectURL(recordedAudio.url);
     }
     setRecordedAudio(null);
-    setSpeechRecognitionText('');
     setManualText('');
     setMicErrorMessage(null);
     if (recorderRef.current) {
@@ -85,52 +89,17 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
     setRecordingDuration(0);
   }, [questionId]);
 
-  // Initialize Web Speech Recognition for live preview if supported
+  // Clean up on unmount
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const SpeechRecognition =
-        (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-      if (SpeechRecognition) {
-        try {
-          const recognition = new SpeechRecognition();
-          recognition.continuous = true;
-          recognition.interimResults = true;
-          recognition.lang = 'es-ES'; // Spanish
-
-          recognition.onresult = (event: any) => {
-            let fullTranscript = '';
-            for (let i = 0; i < event.results.length; i++) {
-              fullTranscript += event.results[i][0].transcript + ' ';
-            }
-            setSpeechRecognitionText(fullTranscript.trim());
-          };
-
-          recognition.onerror = () => {
-            // non-fatal, fallback to Gemini audio transcription
-          };
-
-          speechRecognitionRef.current = recognition;
-        } catch (e) {
-          console.warn('SpeechRecognition initialization error:', e);
-        }
-      }
-    }
-
     return () => {
       resetAudioPlayer();
       if (recorderRef.current) {
         recorderRef.current.cancel();
       }
-      if (speechRecognitionRef.current) {
-        try {
-          speechRecognitionRef.current.stop();
-        } catch {}
-      }
     };
   }, []);
 
   const startRecording = async () => {
-    // Reset any previous audio player and revoke previous URL (Fixes Issue 5)
     resetAudioPlayer();
     if (recordedAudio?.url) {
       URL.revokeObjectURL(recordedAudio.url);
@@ -138,10 +107,9 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
 
     setMicErrorMessage(null);
     setRecordedAudio(null);
-    setSpeechRecognitionText('');
     setRecordingDuration(0);
 
-    // Ensure permission
+    // Ensure microphone permission
     if (micPermission !== 'granted') {
       const granted = await onRequestMicPermission();
       if (!granted) {
@@ -158,13 +126,6 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
       recorderRef.current = recorder;
       await recorder.start();
       setIsRecording(true);
-
-      // Start live speech recognition preview if available
-      if (speechRecognitionRef.current) {
-        try {
-          speechRecognitionRef.current.start();
-        } catch {}
-      }
     } catch (err: any) {
       console.error('Failed to start recording:', err);
       setMicErrorMessage(
@@ -178,12 +139,6 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
     if (!recorderRef.current) return;
 
     try {
-      if (speechRecognitionRef.current) {
-        try {
-          speechRecognitionRef.current.stop();
-        } catch {}
-      }
-
       const result = await recorderRef.current.stop();
       setIsRecording(false);
       setVolumeLevel(0);
@@ -201,6 +156,7 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
         mimeType: result.mimeType,
         duration: result.duration,
         url,
+        isPracticallySilent: result.isPracticallySilent,
       });
     } catch (err: any) {
       console.error('Failed to stop recording:', err);
@@ -214,11 +170,6 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
     if (recorderRef.current) {
       recorderRef.current.cancel();
     }
-    if (speechRecognitionRef.current) {
-      try {
-        speechRecognitionRef.current.stop();
-      } catch {}
-    }
     if (recordedAudio?.url) {
       URL.revokeObjectURL(recordedAudio.url);
     }
@@ -226,7 +177,6 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
     setRecordingDuration(0);
     setVolumeLevel(0);
     setRecordedAudio(null);
-    setSpeechRecognitionText('');
   };
 
   const togglePlayRecordedAudio = () => {
@@ -265,12 +215,13 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
 
   const handleSendAudio = () => {
     if (!recordedAudio) return;
+    // Send ONLY the clean audio recording for the AI to listen to and evaluate genuine speech
     onSubmit({
       audioBase64: recordedAudio.base64,
       mimeType: recordedAudio.mimeType,
-      userText: speechRecognitionText || undefined,
       audioBlob: recordedAudio.blob,
       duration: recordedAudio.duration,
+      isPracticallySilent: recordedAudio.isPracticallySilent,
     });
   };
 
@@ -300,7 +251,7 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
               Tu Turno: Responde en Español en Voz Alta
             </h3>
             <p className="text-xs text-stone-500">
-              Habla con naturalidad. La IA transcribirá y corregirá tus errores.
+              Habla con naturalidad. La IA escuchará tu audio con atención para evaluar tu respuesta real.
             </p>
           </div>
         </div>
@@ -310,7 +261,7 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
           type="button"
           onClick={() => setTextMode(!textMode)}
           disabled={isRecording || isEvaluating}
-          className="text-xs font-semibold text-stone-600 hover:text-stone-900 flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-stone-200 bg-stone-50 hover:bg-stone-100 transition"
+          className="text-xs font-semibold text-stone-600 hover:text-stone-900 flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-stone-200 bg-stone-50 hover:bg-stone-100 transition disabled:opacity-40"
         >
           <Keyboard className="w-3.5 h-3.5 text-stone-500" />
           <span>{textMode ? 'Usar micrófono' : 'Escribir texto'}</span>
@@ -345,15 +296,15 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
             rows={4}
             className="w-full p-4 rounded-2xl border border-stone-200 bg-stone-50/60 text-stone-900 placeholder-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-400 text-sm"
           />
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
             <span className="text-xs text-stone-400">
-              Consejo: Para mejor aprendizaje oral, intenta practicar en voz alta.
+              Consejo: Para mejorar tu fluidez oral, se recomienda practicar con el micrófono.
             </span>
             <button
               type="button"
               onClick={handleSendText}
               disabled={isEvaluating || !manualText.trim()}
-              className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-semibold text-sm transition shadow-xs"
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-semibold text-sm transition shadow-xs shrink-0"
             >
               <Send className="w-4 h-4" />
               <span>{isEvaluating ? 'Evaluando...' : 'Evaluar mi texto'}</span>
@@ -363,8 +314,40 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
       ) : (
         /* AUDIO RECORDING MODE */
         <div className="flex flex-col items-center justify-center py-4">
-          {/* Main State Controls */}
-          {!isRecording && !recordedAudio && (
+          {/* Active processing state when AI is listening and analyzing the audio */}
+          {isEvaluating && (
+            <div className="w-full max-w-md p-6 rounded-2xl bg-amber-50/80 border border-amber-200 text-center animate-in fade-in duration-200 shadow-2xs mb-2">
+              <div className="flex items-center justify-center gap-2 mb-3">
+                <Loader2 className="w-5 h-5 text-amber-600 animate-spin" />
+                <span className="text-xs font-bold uppercase tracking-wider text-amber-800">
+                  {evaluationStage === 'transcribing'
+                    ? 'Paso 1 de 2: Transcribiendo tu voz'
+                    : 'Paso 2 de 2: Evaluando tu respuesta real'}
+                </span>
+              </div>
+              <h4 className="text-sm font-bold text-stone-900 mb-1.5">
+                {evaluationStage === 'transcribing'
+                  ? 'Escuchando tu audio con atención...'
+                  : 'Analizando gramática y precisión...'}
+              </h4>
+              {transcriptionPreview ? (
+                <div className="my-2.5 p-3 rounded-xl bg-white border border-amber-200 text-xs font-medium text-stone-800 italic shadow-2xs">
+                  <span className="text-[10px] uppercase font-bold text-amber-700 block not-italic mb-1">
+                    Transcripción detectada:
+                  </span>
+                  «{transcriptionPreview}»
+                </div>
+              ) : null}
+              <p className="text-xs text-stone-600 leading-relaxed">
+                {evaluationStage === 'transcribing'
+                  ? 'El tutor de IA está escuchando tu grabación para transcribir exactamente las palabras que pronunciaste, sin inventar nada.'
+                  : 'Evaluando con objetividad la gramática, conjugación y relevancia de lo que realmente dijiste.'}
+              </p>
+            </div>
+          )}
+
+          {/* IDLE: Not recording and no recorded audio yet */}
+          {!isRecording && !recordedAudio && !isEvaluating && (
             <div className="flex flex-col items-center text-center">
               <button
                 type="button"
@@ -380,7 +363,7 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
                 Presiona para responder en voz alta
               </p>
               <p className="text-xs text-stone-400 mt-1 max-w-sm">
-                El navegador solicitará acceso a tu micrófono si aún no está activado.
+                Habla con calma y claridad en español. Cuando termines, presiona el botón para detener.
               </p>
             </div>
           )}
@@ -397,9 +380,7 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
                     height: `${Math.max(76, 76 + volumeLevel * 70)}px`,
                   }}
                 ></div>
-                <div
-                  className="w-22 h-22 rounded-full bg-rose-500 text-white shadow-md shadow-rose-500/30 flex flex-col items-center justify-center relative z-10"
-                >
+                <div className="w-22 h-22 rounded-full bg-rose-500 text-white shadow-md shadow-rose-500/30 flex flex-col items-center justify-center relative z-10">
                   <WaveformIcon className="w-8 h-8 animate-pulse" />
                   <span className="text-xs font-mono font-bold mt-1">
                     {formatTime(recordingDuration)}
@@ -421,15 +402,9 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
                 })}
               </div>
 
-              {/* Live speech preview if detected */}
-              {speechRecognitionText && (
-                <div className="mb-4 max-w-lg p-3 rounded-xl bg-stone-50 text-xs font-medium text-stone-700 italic border border-stone-200">
-                  <span className="text-[10px] font-bold text-stone-400 uppercase tracking-wider block not-italic mb-1">
-                    Detectando en vivo:
-                  </span>
-                  "{speechRecognitionText}"
-                </div>
-              )}
+              <p className="text-xs font-medium text-stone-500 mb-4">
+                Grabando tu voz... Habla a tu propio ritmo en español.
+              </p>
 
               {/* Stop & Cancel buttons */}
               <div className="flex items-center gap-3">
@@ -454,12 +429,25 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
           )}
 
           {/* RECORDED AUDIO READY STATE */}
-          {!isRecording && recordedAudio && (
+          {!isRecording && recordedAudio && !isEvaluating && (
             <div className="w-full flex flex-col items-center text-center">
               <div className="flex items-center gap-2 text-emerald-700 font-bold text-sm mb-3">
                 <CheckCircle className="w-5 h-5 text-emerald-600" />
-                <span>¡Grabación completada! ({formatTime(recordedAudio.duration)})</span>
+                <span>¡Audio grabado con éxito! ({formatTime(recordedAudio.duration)})</span>
               </div>
+
+              {/* Silence Warning banner if volume was near zero */}
+              {recordedAudio.isPracticallySilent && (
+                <div className="w-full max-w-md mb-3.5 p-3.5 rounded-2xl bg-amber-50 border border-amber-300 text-amber-900 text-xs flex items-start gap-2.5 text-left">
+                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-bold block text-stone-900 mb-0.5">
+                      Volumen muy bajo o silencio detectado
+                    </span>
+                    El micrófono apenas detectó sonido en esta grabación. Si no hablaste o el micrófono estaba en silencio, te sugerimos presionar <strong>"Grabar de nuevo"</strong> para que el tutor pueda escuchar y evaluar tu voz real.
+                  </div>
+                </div>
+              )}
 
               {/* Audio Listen-back bar */}
               <div className="w-full max-w-md bg-stone-50 border border-stone-200/90 p-3 rounded-2xl flex items-center justify-between gap-3 mb-4">
@@ -486,16 +474,6 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
                 </span>
               </div>
 
-              {/* Preliminary live transcript preview if available */}
-              {speechRecognitionText && (
-                <div className="w-full max-w-md mb-4 p-3 rounded-xl bg-amber-50/60 border border-amber-200/70 text-xs text-left text-stone-800">
-                  <span className="text-[10px] font-bold text-amber-800 uppercase tracking-wider block mb-1">
-                    Transcripción preliminar:
-                  </span>
-                  "{speechRecognitionText}"
-                </div>
-              )}
-
               {/* Action Buttons: Submit / Re-record */}
               <div className="flex flex-wrap items-center justify-center gap-3">
                 <button
@@ -505,9 +483,7 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
                   className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white font-bold text-sm shadow-xs transition disabled:opacity-50"
                 >
                   <Send className="w-4 h-4" />
-                  <span>
-                    {isEvaluating ? 'Evaluando con IA...' : 'Enviar y Recibir Feedback ➔'}
-                  </span>
+                  <span>Enviar y Recibir Feedback ➔</span>
                 </button>
 
                 <button
@@ -527,4 +503,3 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
     </div>
   );
 };
-
