@@ -171,6 +171,7 @@ export default function App() {
           body: JSON.stringify({
             audio: payload.audioBase64,
             mimeType: payload.mimeType || 'audio/webm',
+            isPracticallySilent: payload.isPracticallySilent,
           }),
         });
 
@@ -191,7 +192,16 @@ export default function App() {
 
         // If audio was empty/silent or no human speech detected:
         if (transData.noSpeechDetected || !transData.transcription) {
-          // Send explicit noSpeechDetected to evaluate endpoint to get honest 0-score assessment
+          // If the phone detected real volume (isPracticallySilent is false) but the transcriber still says no speech,
+          // show friendly prompt to try closer to mic instead of the 0-score silent result
+          if (payload.isPracticallySilent === false) {
+            setEvaluationError("I couldn't understand that recording — please try again closer to the mic");
+            setIsEvaluating(false);
+            setEvaluationStage('idle');
+            return;
+          }
+
+          // Otherwise, audio was truly silent: send explicit noSpeechDetected to evaluate endpoint to get honest 0-score assessment
           const evalResponse = await fetch('/api/practice/evaluate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -199,6 +209,7 @@ export default function App() {
               audio: payload.audioBase64,
               mimeType: payload.mimeType || 'audio/webm',
               noSpeechDetected: true,
+              isPracticallySilent: payload.isPracticallySilent,
               questionEs: question.questionEs,
               questionEn: question.questionEn,
               level: question.level,
@@ -228,6 +239,7 @@ export default function App() {
               transcribedText: cleanTranscript,
               audio: payload.audioBase64,
               mimeType: payload.mimeType || 'audio/webm',
+              isPracticallySilent: payload.isPracticallySilent,
               questionEs: question.questionEs,
               questionEn: question.questionEn,
               level: question.level,

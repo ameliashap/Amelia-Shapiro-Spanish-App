@@ -440,13 +440,12 @@ You must preserve every error exactly as spoken:
 - False starts and repetitions
 
 Explicit rule: Never correct the speaker. If they say 'yo es', write 'yo es'.
-Mark unclear words as [inaudible] instead of guessing.
+If some words are unclear, transcribe what you can and mark only those words as [inaudible] instead of guessing.
 
 RULES:
-1. If the audio is silent, background static, breathing, unintelligible noise, or contains NO intelligible words, respond with EXACTLY:
-NO_SPEECH_DETECTED
+1. Output NO_SPEECH_DETECTED ONLY if the ENTIRE clip contains no human speech at all (silence, static, breathing, or background noise with no spoken words).
 2. If human words are spoken, output ONLY the exact words spoken verbatim. Do NOT correct grammatical errors, do NOT translate, do NOT add commentary, and do NOT put quotes around the text.
-3. NEVER fabricate or imagine words. If unsure or if nothing was said, output: NO_SPEECH_DETECTED`;
+3. NEVER fabricate or imagine words. Never output NO_SPEECH_DETECTED if any speech is present, even if it is unclear or has mistakes.`;
 
   let transcribedRaw = '';
 
@@ -462,6 +461,7 @@ NO_SPEECH_DETECTED
       },
     });
     transcribedRaw = (res.text || '').trim();
+    console.log('[transcribeAudio:gemini-3.5-transcribe] Raw transcriber output:', transcribedRaw);
   } catch (err: any) {
     const errStr = `${err?.message || ''}`.toLowerCase();
     if (
@@ -482,21 +482,57 @@ NO_SPEECH_DETECTED
       },
     });
     transcribedRaw = (res2.text || '').trim();
+    console.log('[transcribeAudio:gemini-3.8-flash fallback] Raw transcriber output:', transcribedRaw);
+  }
+
+  // If gemini-3.5-transcribe returns NO_SPEECH_DETECTED, retry once with gemini-3.8-flash before concluding the audio is silent
+  const candidateClean = transcribedRaw.replace(/^["'`]|["'`]$/g, '').trim();
+  const candidateUpper = candidateClean.toUpperCase();
+  const candidateWithoutInaudible = candidateClean.replace(/\[inaudible\]/gi, '').trim();
+  const candidateIsNoSpeech =
+    !candidateClean ||
+    candidateUpper === 'NO_SPEECH_DETECTED' ||
+    candidateUpper === 'NO_SPEECH' ||
+    candidateWithoutInaudible === '';
+
+  if (candidateIsNoSpeech) {
+    console.log('[transcribeAudio] gemini-3.5-transcribe indicated no speech. Retrying once with gemini-3.8-flash before concluding silent...');
+    try {
+      const retryRes = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: {
+          parts: [audioPart, { text: transcriptionPrompt }],
+        },
+        config: {
+          temperature: 0.0,
+        },
+      });
+      const retryRaw = (retryRes.text || '').trim();
+      console.log('[transcribeAudio:gemini-3.8-flash retry] Raw transcriber output:', retryRaw);
+      if (retryRaw) {
+        transcribedRaw = retryRaw;
+      }
+    } catch (retryErr: any) {
+      console.warn('[transcribeAudio] gemini-3.8-flash retry error:', retryErr?.message || retryErr);
+    }
   }
 
   // Clean up any outer quotes or whitespace
-  let cleanText = transcribedRaw.replace(/^["'`]|["'`]$/g, '').trim();
+  const cleanText = transcribedRaw.replace(/^["'`]|["'`]$/g, '').trim();
+  console.log('[transcribeAudio] Final raw transcriber output:', transcribedRaw);
+  console.log('[transcribeAudio] Clean text:', cleanText);
+
+  // Strict isNoSpeech check: silent ONLY if empty, exactly NO_SPEECH_DETECTED / NO_SPEECH, or contains only [inaudible] tags
+  const upperText = cleanText.toUpperCase();
+  const textWithoutInaudible = cleanText.replace(/\[inaudible\]/gi, '').trim();
 
   const isNoSpeech =
     !cleanText ||
-    cleanText === 'NO_SPEECH_DETECTED' ||
-    cleanText === 'NO_SPEECH' ||
-    cleanText.toUpperCase().includes('NO_SPEECH_DETECTED') ||
-    cleanText.toLowerCase().includes('no se detect') ||
-    cleanText.toLowerCase().includes('no human speech') ||
-    cleanText.toLowerCase().includes('no speech detected') ||
-    cleanText.toLowerCase().includes('silence') ||
-    cleanText.length < 2;
+    upperText === 'NO_SPEECH_DETECTED' ||
+    upperText === 'NO_SPEECH' ||
+    textWithoutInaudible === '';
+
+  console.log('[transcribeAudio] isNoSpeech result:', isNoSpeech);
 
   if (isNoSpeech) {
     return { text: '', noSpeechDetected: true };
@@ -542,7 +578,7 @@ function getSilentAudioResponse(questionEs: string, level: string, topic: string
 // Dedicated audio transcription endpoint to allow step-by-step UI and genuine transcription verification
 app.post('/api/practice/transcribe', async (req, res) => {
   try {
-    const { audio, mimeType = 'audio/webm' } = req.body;
+    const { audio, mimeType = 'audio/webm', isPracticallySilent } = req.body;
     if (!audio) {
       return res.status(400).json({ error: 'Audio is required for transcription' });
     }
@@ -558,6 +594,7 @@ app.post('/api/practice/transcribe', async (req, res) => {
       success: true,
       transcription: result.text,
       noSpeechDetected: result.noSpeechDetected,
+      isPracticallySilent,
     });
   } catch (err: any) {
     console.error('Transcription error:', err);
@@ -586,6 +623,7 @@ app.post('/api/practice/evaluate', async (req, res) => {
       mimeType = 'audio/webm',
       transcribedText, // optional pre-transcribed text from step 1
       noSpeechDetected: explicitNoSpeech,
+      isPracticallySilent,
       questionEs,
       questionEn,
       level = 'beginner',
@@ -613,8 +651,14 @@ app.post('/api/practice/evaluate', async (req, res) => {
     let actualStudentText = '';
 
     if (isAudio) {
-      // If the client already flagged explicit no speech, return honest 0-score immediately
+      // If the client already flagged explicit no speech
       if (explicitNoSpeech === true) {
+        if (isPracticallySilent === false) {
+          return res.status(400).json({
+            success: false,
+            error: "I couldn't understand that recording — please try again closer to the mic",
+          });
+        }
         return res.json({
           success: true,
           data: getSilentAudioResponse(questionEs, level, topic),
@@ -625,6 +669,12 @@ app.post('/api/practice/evaluate', async (req, res) => {
       if (typeof transcribedText === 'string') {
         const trimmed = transcribedText.trim();
         if (!trimmed || trimmed === 'NO_SPEECH_DETECTED') {
+          if (isPracticallySilent === false) {
+            return res.status(400).json({
+              success: false,
+              error: "I couldn't understand that recording — please try again closer to the mic",
+            });
+          }
           return res.json({
             success: true,
             data: getSilentAudioResponse(questionEs, level, topic),
@@ -635,6 +685,12 @@ app.post('/api/practice/evaluate', async (req, res) => {
         // Run dedicated transcription first
         const transResult = await transcribeAudio(audio, mimeType);
         if (transResult.noSpeechDetected || !transResult.text) {
+          if (isPracticallySilent === false) {
+            return res.status(400).json({
+              success: false,
+              error: "I couldn't understand that recording — please try again closer to the mic",
+            });
+          }
           return res.json({
             success: true,
             data: getSilentAudioResponse(questionEs, level, topic),
