@@ -431,11 +431,21 @@ async function transcribeAudio(
   };
 
   const transcriptionPrompt = `You are a strict, verbatim Spanish audio transcriber.
-Listen to this audio clip attentively.
+The speaker is a Spanish LEARNER and the transcript is used to grade their mistakes.
+You must preserve every error exactly as spoken:
+- Wrong conjugations
+- Wrong gender/number agreement
+- Missing articles
+- English words
+- False starts and repetitions
+
+Explicit rule: Never correct the speaker. If they say 'yo es', write 'yo es'.
+Mark unclear words as [inaudible] instead of guessing.
+
 RULES:
-1. If the audio is silent, background static, breathing, unintelligible noise, or contains NO intelligible words in Spanish, respond with EXACTLY:
+1. If the audio is silent, background static, breathing, unintelligible noise, or contains NO intelligible words, respond with EXACTLY:
 NO_SPEECH_DETECTED
-2. If human words in Spanish are spoken, output ONLY the exact Spanish words verbatim. Do NOT correct grammatical errors, do NOT translate, do NOT add commentary, and do NOT put quotes around the text.
+2. If human words are spoken, output ONLY the exact words spoken verbatim. Do NOT correct grammatical errors, do NOT translate, do NOT add commentary, and do NOT put quotes around the text.
 3. NEVER fabricate or imagine words. If unsure or if nothing was said, output: NO_SPEECH_DETECTED`;
 
   let transcribedRaw = '';
@@ -662,7 +672,7 @@ app.post('/api/practice/evaluate', async (req, res) => {
         overallScore: {
           type: Type.INTEGER,
           description:
-            'Genuine score from 0 to 100 based strictly on accuracy, grammar, and speech effort.',
+            'Score from 0 to 100 based strictly on bands: 90-100 (fully answers, no errors, level-appropriate), 70-89 (answers with minor errors), 50-69 (partly answers or errors affect meaning), 25-49 (barely answers/very short), 0-24 (off-topic or unintelligible).',
         },
         fluencyScore: {
           type: Type.INTEGER,
@@ -680,7 +690,7 @@ app.post('/api/practice/evaluate', async (req, res) => {
         praise: {
           type: Type.STRING,
           description:
-            'Honest praise highlighting specifically what the student did well. Never praise errors.',
+            'Honest praise mentioning something specific the student actually said. If nothing deserves praise, state so honestly.',
         },
         summary: {
           type: Type.STRING,
@@ -737,7 +747,7 @@ app.post('/api/practice/evaluate', async (req, res) => {
         pronunciationTips: {
           type: Type.ARRAY,
           description:
-            '1 to 3 specific pronunciation/phonetic tips for Spanish sounds heard in the audio. Empty array if typed text.',
+            '0 to 3 pronunciation tips. Each tip must name a specific word from the transcript and the specific sound the student got wrong. If pronunciation was fine or if typed text, return an empty array []. Never give generic tips.',
           items: { type: Type.STRING },
         },
         tutorReply: {
@@ -793,20 +803,26 @@ CRITICAL MANDATES:
    - "transcriptionEn" must be a faithful English translation of "${actualStudentText}".
    - "noSpeechDetected" must be false.
    - DO NOT fabricate, assume, or invent words that the student did not say.
-2. ACCURACY EVALUATION:
-   - Determine if what the student said ("${actualStudentText}") genuinely and accurately answers the prompt question ("${questionEs}").
-   - Set "isAccurateAnswer" to true ONLY if their answer is relevant and addresses the question.
-   - If they said something unrelated (e.g. only "Hola" or "No sé" or gibberish), set "isAccurateAnswer" to false.
-3. SCORING (0 to 100):
-   - Score objectively based strictly on the student's actual words ("${actualStudentText}").
-   - If the answer accurately answers the question with correct grammar, award a high score (75-100).
-   - If there are grammatical mistakes or poor accuracy, reflect that proportionally.
-   - If they only said an irrelevant greeting or disconnected fragment, score strictly low (20-40).
+2. SCORING RUBRIC (overallScore):
+   Score overallScore strictly using the following bands:
+   - 90–100: Fully answers the question, no errors, level-appropriate.
+   - 70–89: Answers the question with minor errors.
+   - 50–69: Partly answers or has several errors that affect meaning.
+   - 25–49: Barely answers or is very short.
+   - 0–24: Off-topic or unintelligible.
+   Align fluencyScore, grammarScore, and vocabularyScore (0–100) consistently with these overallScore bands.
+   Set "isAccurateAnswer" to true if their answer is relevant and addresses the prompt question; set to false if off-topic or unintelligible.
+3. PRAISE:
+   - The praise must mention something specific the student actually said.
+   - If nothing deserves praise, say so honestly.
 4. CORRECTIONS:
    - Identify real errors in grammar, verb conjugations, gender/number agreement, ser/estar, por/para, or syntax present in "${actualStudentText}".
    - If what they said contains NO grammatical errors, return an empty array []! NEVER invent false errors!
-5. PRONUNCIATION TIPS:
-   - Since this was an audio recording, provide 1 to 3 specific Spanish phonetic tips relevant to the sounds in the words they spoke (e.g. vowels, rolled rr, soft d, accent stress).
+5. PRONUNCIATION TIPS (0 to 3 tips):
+   - Listen to the audio recording carefully when judging pronunciation and fluency.
+   - Provide 0 to 3 tips. Each tip MUST name a specific word from the transcript and the specific sound the student got wrong.
+   - If pronunciation was fine, return an empty array [].
+   - Never give generic tips.
 6. BETTER WAY:
    - Show how an authentic native Spanish speaker would naturally express the student's intended answer to "${questionEs}".
 7. TUTOR REPLY:
@@ -815,7 +831,13 @@ CRITICAL MANDATES:
 - The student typed: "${actualStudentText}"
 - Transcribe EXACTLY what the student typed: "${actualStudentText}".
 - ACCURACY: Check if what the student typed accurately answers "${questionEs}". Set "isAccurateAnswer" accordingly.
-- SCORING: Genuine scores (0-100) based strictly on written grammar and vocabulary.
+- SCORING RUBRIC (overallScore):
+  - 90–100: Fully answers the question, no errors, level-appropriate.
+  - 70–89: Answers the question with minor errors.
+  - 50–69: Partly answers or has several errors that affect meaning.
+  - 25–49: Barely answers or is very short.
+  - 0–24: Off-topic or unintelligible.
+- PRAISE: Must mention something specific the student actually typed. If nothing deserves praise, say so honestly.
 - CORRECTIONS: Identify specific grammar or spelling errors in their typed text. If none, return [].
 - PRONUNCIATION: The student typed their response. Set "pronunciationTips" to [] (EMPTY ARRAY). Do not invent pronunciation comments.
 - NATIVE REFORMULATION: Provide natural native Spanish phrasing.
@@ -827,16 +849,33 @@ Context:
 - Target Student Level: ${level}
 - Topic: ${topic}`;
 
-    // Call Gemini with fallback to gemini-3.1-flash-lite if primary is temporarily busy
+    // Prepare audio part if audio is available so the evaluator actually hears the recording
+    let audioPart: { inlineData: { mimeType: string; data: string } } | null = null;
+    if (audio && typeof audio === 'string' && audio.trim()) {
+      const cleanBase64 = audio.includes('base64,') ? audio.split('base64,')[1] : audio;
+      const cleanMimeType = (mimeType || 'audio/webm').split(';')[0].trim() || 'audio/webm';
+      audioPart = {
+        inlineData: {
+          mimeType: cleanMimeType,
+          data: cleanBase64,
+        },
+      };
+    }
+
+    const evaluationContents = audioPart
+      ? { parts: [audioPart, { text: evaluationPrompt }] }
+      : evaluationPrompt;
+
+    // Call Gemini with thinkingLevel MEDIUM and fallback to gemini-3.1-flash-lite if primary is temporarily busy
     let responseText = '';
     try {
       const response = await ai.models.generateContent({
         model: 'gemini-3.8-flash',
-        contents: evaluationPrompt,
+        contents: evaluationContents,
         config: {
           responseMimeType: 'application/json',
           responseSchema: evaluationSchema,
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
         },
       });
       responseText = response.text || '';
@@ -844,10 +883,11 @@ Context:
       console.warn('Primary evaluation model error, attempting gemini-3.1-flash-lite fallback:', primaryErr?.message || primaryErr);
       const fallbackRes = await ai.models.generateContent({
         model: 'gemini-3.1-flash-lite',
-        contents: evaluationPrompt,
+        contents: evaluationContents,
         config: {
           responseMimeType: 'application/json',
           responseSchema: evaluationSchema,
+          thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
         },
       });
       responseText = fallbackRes.text || '';
@@ -863,6 +903,26 @@ Context:
     const parsed = JSON.parse(cleaned);
     if (!parsed || typeof parsed !== 'object' || typeof parsed.overallScore !== 'number') {
       throw new Error('Formato de evaluación devuelto por la IA no es válido.');
+    }
+
+    // GROUNDING CHECKS IN CODE:
+    // 1. Overwrite parsed.transcription with the actual transcript string (don't trust the model to copy it).
+    parsed.transcription = actualStudentText;
+
+    // 2. Remove any item in parsed.corrections whose "original" text does not appear in the transcript (case-insensitive).
+    if (Array.isArray(parsed.corrections)) {
+      const lowerTranscript = actualStudentText.toLowerCase();
+      parsed.corrections = parsed.corrections.filter((item: any) => {
+        if (!item || typeof item.original !== 'string') return false;
+        const orig = item.original.trim().toLowerCase();
+        return orig.length > 0 && lowerTranscript.includes(orig);
+      });
+    } else {
+      parsed.corrections = [];
+    }
+
+    if (!Array.isArray(parsed.pronunciationTips)) {
+      parsed.pronunciationTips = [];
     }
 
     // Attach isAudio flag explicitly to response
